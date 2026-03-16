@@ -1,0 +1,99 @@
+seed: 42
+
+profile: two_tower_gvp_dmpnn
+
+data:
+  manifests_dir: data/processed/manifests
+  docking_manifest: rnamigos_docking_manifest.csv
+  binary_manifest: rnamigos_binary_manifest.csv
+  decoy_manifest: rnamigos_ligand_decoy_manifest.csv
+  site_manifest: rnamigos_pocket_nodes_manifest.csv
+  max_rna_tokens: 96
+  max_lig_tokens: 72
+
+featurizer:
+  mode: real
+  pocket_source: json_pockets_expanded
+  ligand_source: rdkit_mol_graph
+
+model:
+  embed_dim: 192
+  num_heads: 4
+  dropout: 0.1
+  architecture: two_tower
+
+  rna_tower:
+    encoder_type: gvp_gnn
+    num_layers: 4
+    scalar_dim: 128
+    vector_dim: 16
+    edge_dim: 32
+
+  ligand_tower:
+    encoder_type: dmpnn
+    num_layers: 5
+    hidden_dim: 192
+    edge_dim: 32
+
+  projection:
+    dim: 192
+    normalize: true
+
+train:
+  batch_size: 24
+  epochs: 12
+  lr: 6.0e-4
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+
+  decoy_curriculum:
+    stage1_negatives_per_positive: 20
+    stage2_negatives_per_positive: 50
+    stage3_negatives_per_positive: 100
+
+loss:
+  contrastive_temperature: 0.2
+
+  lambda_rank: 1.0
+  lambda_dock: 0.5
+  lambda_site: 0.6
+
+  lambda_decoy: 1.0
+  lambda_affinity_reg: 0.3
+
+schedule:
+  stage1_epochs: 4
+  stage2_epochs: 4
+  stage3_epochs: 4
+
+  stage1_enable:
+    contrastive: true
+    decoy: true
+    rank: false
+    docking: false
+    site: false
+
+  stage2_enable:
+    contrastive: true
+    decoy: true
+    rank: true
+    docking: true
+    site: false
+
+  stage3_enable:
+    contrastive: true
+    decoy: true
+    rank: true
+    docking: true
+    site: true
+
+split:
+  policy: scaffold_plus_family
+  ligand_split: bemis_murcko
+  rna_split: family
+  seed: 42
+
+output:
+  checkpoint_dir: outputs/checkpoints_two_tower
+  log_every: 20
+  save_every_epoch: true

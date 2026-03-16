@@ -1,0 +1,45 @@
+seed: 42
+
+profile: downstream_affinity
+
+data:
+  manifests_dir: data/processed/manifests
+  docking_manifest: rnamigos_docking_manifest.csv
+  binary_manifest: rnamigos_binary_manifest.csv
+  decoy_manifest: rnamigos_ligand_decoy_manifest.csv
+  site_manifest: rnamigos_pocket_nodes_manifest.csv
+  max_rna_tokens: 96
+  max_lig_tokens: 72
+
+featurizer:
+  mode: real
+
+model:
+  embed_dim: 192
+  num_heads: 4
+  dropout: 0.1
+  architecture: two_tower
+
+train:
+  batch_size: 24
+  epochs: 12
+  lr: 6.0e-4
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  negatives_per_positive: 16
+
+loss:
+  contrastive_temperature: 0.2
+  lambda_rank: 0.6
+  lambda_dock: 1.0
+  lambda_site: 0.0
+  lambda_decoy: 0.3
+
+schedule:
+  phase1_epochs: 3
+  phase2_epochs: 4
+  phase3_epochs: 5
+
+output:
+  checkpoint_dir: outputs/checkpoints_affinity
+  log_every: 20

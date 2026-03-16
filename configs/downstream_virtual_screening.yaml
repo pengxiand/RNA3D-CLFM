@@ -1,0 +1,49 @@
+seed: 42
+
+profile: downstream_virtual_screening
+
+data:
+  manifests_dir: data/processed/manifests
+  docking_manifest: rnamigos_docking_manifest.csv
+  binary_manifest: rnamigos_binary_manifest.csv
+  decoy_manifest: rnamigos_ligand_decoy_manifest.csv
+  site_manifest: rnamigos_pocket_nodes_manifest.csv
+  max_rna_tokens: 96
+  max_lig_tokens: 72
+
+featurizer:
+  mode: real
+
+model:
+  embed_dim: 192
+  num_heads: 4
+  dropout: 0.1
+  architecture: two_tower
+
+train:
+  batch_size: 24
+  epochs: 10
+  lr: 6.0e-4
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+
+  decoy_curriculum:
+    stage1_negatives_per_positive: 20
+    stage2_negatives_per_positive: 50
+    stage3_negatives_per_positive: 100
+
+loss:
+  contrastive_temperature: 0.2
+  lambda_rank: 1.0
+  lambda_dock: 0.2
+  lambda_site: 0.0
+  lambda_decoy: 1.0
+
+schedule:
+  stage1_epochs: 3
+  stage2_epochs: 4
+  stage3_epochs: 3
+
+output:
+  checkpoint_dir: outputs/checkpoints_vs
+  log_every: 20

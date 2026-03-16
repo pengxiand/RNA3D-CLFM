@@ -1,0 +1,16 @@
+project_name: RNA3D-CLFM
+
+data_sources:
+  rnamigos2: ../rnamigos2
+  gerna_bind: ../GerNA-Bind
+
+prepare:
+  link_mode: symlink
+  build_pocket_node_manifest: true
+
+manifests:
+  bridge: data/processed/manifests/bridge_manifest.csv
+  gerna_affinity: data/processed/manifests/gerna_affinity_manifest.csv
+  rnamigos_docking: data/processed/manifests/rnamigos_docking_manifest.csv
+  rnamigos_binary: data/processed/manifests/rnamigos_binary_manifest.csv
+  summary: data/processed/manifests/summary.json

@@ -1,0 +1,54 @@
+project_name: RNA3D-CLFM
+
+representation:
+  pocket:
+    default: gvp_gnn_pocket_3d
+    options:
+      - gvp_gnn_pocket_3d
+      - egnn_pocket_3d
+      - relation_aware_rna_graph
+      - residue_tokens_only
+
+  ligand:
+    default: dmpnn_mol_graph
+    options:
+      - dmpnn_mol_graph
+      - attentivefp_mol_graph
+      - graph_transformer_mol
+      - ecfp_mlp
+      - hybrid_graph_plus_ecfp
+
+  interaction:
+    default: two_tower_projection
+    options:
+      - two_tower_projection
+      - two_tower_plus_light_cross_attention
+
+training_recommendation:
+  stageA: contrastive_plus_decoy_pretrain
+  stageB: add_ranking_and_affinity
+  stageC: joint_with_site_head
+
+loss_recommendation:
+  base_stack:
+    - infonce_contrastive
+    - margin_ranking
+    - decoy_bce
+    - site_bce
+  optional:
+    - docking_regression
+
+decoy_curriculum:
+  suggested_counts:
+    - 20
+    - 50
+    - 100
+  hardness_tiers:
+    - easy
+    - medium
+    - hard
+
+notes:
+  - Keep manifest schema stable while swapping encoders.
+  - Keep RNAmigos2 preprocessing as data interface, not as fixed 2.5D model assumption.
+  - Use strict ligand scaffold split plus RNA family split for main reporting.
