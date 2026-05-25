@@ -1,0 +1,126 @@
+# hariboss5fd_rank_pkl_v25.yaml
+# BridgeBind3D v25 — Eval-aligned negative budget (cross-heavy + small hard-decoy share)
+#
+# Rationale (post-v24 diagnostic):
+#   - Eval pool is 100% cross-pocket NATIVE ligands (other pockets' real binders).
+#   - Training negatives should match this distribution dominantly.
+#   - But FP2 synthetic decoys still teach the binder/non-binder concept and
+#     should be kept as a small auxiliary share — not dropped entirely.
+#
+#   Observation from v24 log:
+#     ep05 (K: 12→36) brought RP +7 points (0.59 → 0.66). The dominant driver
+#     is +18 cross-pocket negatives, not +6 hard decoys. So re-budget toward cross.
+#
+# Changes vs v24 (cross_ratio=0.75 baseline):
+#   1. Stage-2 K: 36 → 48               (more cross-pocket capacity earlier)
+#   2. cross_pocket_ratio: 0.75 → 0.85  (cross : hard ≈ 5.7 : 1, eval-aligned)
+#   3. circle_gamma: 64 → 32            (loss landscape less steep → can converge)
+#   4. ranking_margin: 0.30 → 0.25      (Circle paper default; gentler)
+#   5. tau_end: 0.07 → 0.15             (don't over-sharpen)
+#
+# Stage-wise negative composition (with cross_ratio=0.85):
+#   stage1  K=12  → cross=10,  hard=2
+#   stage2  K=48  → cross=40,  hard=8     ← ablation C setting throughout
+#   stage3  K=72  → cross=61,  hard=11
+
+seed: 42
+
+data:
+  pkl_path: /home/liangjialu/blue_qsong1/liangjialu/data/test_RNA/new/hariboss_5fd_cov08_clustered_seqid_0.3_clean.pkl
+  decoy_lookup_path: /home/liangjialu/blue_qsong1/liangjialu/data/test_RNA/new/BridgeBind3D/data/decoy_fp2_lookup.pkl
+  rna3d_dirs:
+    - /home/liangjialu/blue_qsong1/liangjialu/data/test_RNA/rnamigos2/data/json_pockets_3d
+    - /home/liangjialu/blue_qsong1/liangjialu/data/test_RNA/new/BridgeBind3D/data/json_pockets_cif
+
+model:
+  version: 3
+  embed_dim: 256
+  num_heads: 4
+  dropout: 0.1
+  max_rna_tokens: 80
+  max_lig_tokens: 64
+
+  include_pocket_feat: true
+
+  rna_tower:
+    encoder_type: egnn
+    num_layers: 6
+
+  interaction:
+    num_layers: 4
+    use_dist_bias: true
+
+  use_pretrained_ligand: false
+
+  ligand_tower:
+    num_layers: 4
+
+  projection:
+    dim: 256
+    normalize: true
+
+train:
+  batch_size: 2
+  epochs: 20
+  steps_per_epoch: 2500
+  lr: 8.0e-5
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+
+  lr_scheduler:
+    type: cosine
+    warmup_steps: 500
+    min_lr_ratio: 0.02
+
+  # Cross-heavy curriculum: train distribution matches eval (cross-pocket native).
+  # Small hard-decoy share kept as auxiliary "what is a binder" signal.
+  decoy_curriculum:
+    stage1_negatives_per_positive: 12
+    stage2_negatives_per_positive: 48     # was 36; more cross-pocket capacity
+    stage3_negatives_per_positive: 72
+    cross_pocket_ratio: 0.85              # cross : hard ≈ 5.7 : 1
+
+  val_decoy_k: 100
+
+# Hard-negative mining on the SYNTHETIC decoy pool (per-pocket FP2 decoys).
+# Kept on so the small hard-decoy share is informative rather than random.
+hard_negative_mining:
+  enabled: true
+  start_epoch: 5
+  refresh_every: 3
+  top_k: 64
+  candidate_pool_size: 200
+
+loss:
+  use_circle_loss: true
+  circle_gamma: 32.0              # was 64; tamer landscape → loss can drop further
+  ranking_margin: 0.25            # Circle Loss paper default
+
+  adaptive_margin: true           # active for the auxiliary margin term
+
+  contrastive_temperature_start: 0.25
+  contrastive_temperature_end:   0.15
+
+  ranking_margin_end: 0.25
+  margin_restart_epochs: 0
+  hard_margin_topk: 0
+
+  lambda_contrast: 1.0
+  lambda_rank: 0.3
+  lambda_rna_contrast: 1.0
+  lambda_site: 0.3
+  site_start_epoch: 7
+
+schedule:
+  stage1_epochs: 5
+  stage2_epochs: 5
+
+output:
+  checkpoint_dir: /blue/qsong1/liangjialu/bb3d_v25/crossheavy_g32_m25_fold0
+  log_every: 50
+  val_max_pockets: 200
+
+early_stopping:
+  reload_patience: 2
+  reload_lr_scale: 0.5
+  patience: 10
