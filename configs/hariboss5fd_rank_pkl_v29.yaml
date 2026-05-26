@@ -58,7 +58,7 @@ train:
   moco_queue_size: 248    # effective RNA InfoNCE batch = 8 + 248 = 256
   epochs: 20
   steps_per_epoch: 1500
-  lr: 1.5e-4
+  lr: 1.0e-4
   weight_decay: 1.0e-4
   grad_clip: 1.0
 
@@ -91,7 +91,7 @@ loss:
 
   lambda_contrast: 1.0
   lambda_rank: 1.0
-  lambda_rna_contrast: 1.0
+  lambda_rna_contrast: 0.3   # scaled down from 1.0: 256-way InfoNCE is 2.67x harder than 8-way
 
   lambda_soft_rp: 0.1
   soft_rp_temp: 0.1
