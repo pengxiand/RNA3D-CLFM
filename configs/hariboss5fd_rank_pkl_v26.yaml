@@ -89,8 +89,8 @@ loss:
 
   adaptive_margin: true
 
-  # Soft-RP: differentiable rank percentile loss (directly optimises RP metric)
-  lambda_soft_rp: 0.15
+  # Soft-RP disabled for clean ablation (set >0 to enable)
+  lambda_soft_rp: 0.0
   soft_rp_temp: 0.1
 
   contrastive_temperature_start: 0.25
@@ -111,7 +111,7 @@ schedule:
   stage2_epochs: 5
 
 output:
-  checkpoint_dir: /blue/qsong1/liangjialu/bb3d_v26/bugfix_pharma_softrp_fold0
+  checkpoint_dir: /blue/qsong1/liangjialu/bb3d_v26/gammabugfix_fold0
   log_every: 50
   val_max_pockets: 200
 

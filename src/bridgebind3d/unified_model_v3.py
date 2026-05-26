@@ -49,9 +49,9 @@ from bridgebind3d.optimol_encoder import OptiMolLigandEncoder
 # ------------------------------------------------------------------
 # Feature dimension constants (match featurizers.py)
 # ------------------------------------------------------------------
-RNA_NODE_DIM: int = 10  # nt_onehot(5) + degree(1) + pos_norm(1) + pharma(3); +1 if include_pocket_feat
+RNA_NODE_DIM: int = 7   # nt_onehot(5) + degree(1) + pos_norm(1); +1 if include_pocket_feat
 RNA_EDGE_DIM: int = 4   # edge_type_onehot
-LIG_NODE_DIM: int = 11  # atom_features(6) + hbd(1) + hba(1) + hybridization(3)
+LIG_NODE_DIM: int = 9   # atom_features(6) + hybridization(3)
 LIG_EDGE_DIM: int = 4   # bond_type_onehot
 
 
