@@ -20,6 +20,12 @@ except Exception:
 NT_ORDER = ["A", "C", "G", "U", "N"]
 BOND_ORDER = ["SINGLE", "DOUBLE", "TRIPLE", "AROMATIC"]
 
+# Per-nucleotide pharmacophore properties (Watson-Crick base chemistry)
+# purine: A/G=1, C/U=0; hbd: H-bond donors/2; hba: H-bond acceptors/3
+_NT_PURINE   = {"A": 1.0, "G": 1.0, "C": 0.0, "U": 0.0, "N": 0.5}
+_NT_HBD_NORM = {"A": 0.5, "G": 1.0, "C": 0.5, "U": 1.0, "N": 0.75}
+_NT_HBA_NORM = {"A": 0.67, "G": 0.67, "C": 1.0, "U": 0.67, "N": 0.75}
+
 
 def _seed_from_text(text: str) -> int:
     digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:8]
@@ -210,7 +216,7 @@ def build_rna_graph(pocket_id: str, pocket_structure_path: str) -> RNAGraph:
     if not nodes:
         # Deterministic fallback keeps pipeline runnable for missing structures.
         n = 16
-        node_feat = torch.zeros((n, 7), dtype=torch.float32)
+        node_feat = torch.zeros((n, 10), dtype=torch.float32)
         node_feat[:, -1] = torch.linspace(0, 1, steps=n)
         pos = torch.stack([torch.linspace(0, 1, steps=n), torch.zeros(n), torch.zeros(n)], dim=-1)
         edge_src = torch.arange(0, n - 1, dtype=torch.long)
@@ -233,8 +239,16 @@ def build_rna_graph(pocket_id: str, pocket_structure_path: str) -> RNAGraph:
     xyz = []
     site_label = []
     for i, n in enumerate(nodes):
-        nt = _nt_one_hot(str(n.get("nt_code", "N")))
-        node_feat.append(torch.cat([nt, deg_norm[i], pos_norm[i]], dim=0))
+        nt_code = str(n.get("nt_code", "N")).upper()
+        if nt_code not in _NT_PURINE:
+            nt_code = "N"
+        nt = _nt_one_hot(nt_code)
+        pharma = torch.tensor([
+            _NT_PURINE[nt_code],
+            _NT_HBD_NORM[nt_code],
+            _NT_HBA_NORM[nt_code],
+        ], dtype=torch.float32)
+        node_feat.append(torch.cat([nt, deg_norm[i], pos_norm[i], pharma], dim=0))
         xyz.append(_extract_xyz(n))
         site_label.append(float(n.get("in_pocket", 0.0)))
     node_feat_t = torch.stack(node_feat, dim=0).to(torch.float32)
@@ -318,16 +332,18 @@ def _hybrid_three(atom) -> torch.Tensor:
 def build_lig_graph(ligand_smiles: str) -> LigandGraph:
     smiles = ligand_smiles or ""
     if Chem is None:
-        node_feat = torch.zeros((1, 9), dtype=torch.float32)
+        node_feat = torch.zeros((1, 11), dtype=torch.float32)
         return LigandGraph(node_feat=node_feat, edge_index=torch.zeros((2, 0), dtype=torch.long), edge_feat=torch.zeros((0, 4)))
 
     mol = Chem.MolFromSmiles(smiles)
     if mol is None or mol.GetNumAtoms() == 0:
-        node_feat = torch.zeros((1, 9), dtype=torch.float32)
+        node_feat = torch.zeros((1, 11), dtype=torch.float32)
         return LigandGraph(node_feat=node_feat, edge_index=torch.zeros((2, 0), dtype=torch.long), edge_feat=torch.zeros((0, 4)))
 
     nfeat = []
     for atom in mol.GetAtoms():
+        is_donor    = float(atom.GetAtomicNum() in {7, 8} and atom.GetTotalNumHs() > 0)
+        is_acceptor = float(atom.GetAtomicNum() in {7, 8, 9, 16})
         nfeat.append(
             torch.tensor(
                 [
@@ -337,6 +353,8 @@ def build_lig_graph(ligand_smiles: str) -> LigandGraph:
                     float(atom.GetIsAromatic()),
                     float(atom.GetTotalNumHs()) / 4.0,
                     float(atom.IsInRing()),
+                    is_donor,
+                    is_acceptor,
                 ]
             )
         )

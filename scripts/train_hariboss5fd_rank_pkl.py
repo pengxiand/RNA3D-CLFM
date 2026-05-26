@@ -491,6 +491,9 @@ def _rank_loss_step(
     use_fp2_ligand: bool = False,
     use_circle_loss: bool = False,
     adaptive_margin: bool = False,
+    circle_gamma: float = 80.0,
+    lambda_soft_rp: float = 0.0,
+    soft_rp_temp: float = 0.1,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """One optimisation step — SMARTBind-style mixed negatives.
 
@@ -589,8 +592,9 @@ def _rank_loss_step(
     z_lig_all = out["z_lig"]   # [total, D] — needed for rna_cts sim-matrix
     z_rna_all = out["z_rna"]   # [total, D]
 
-    infonce_list: list[torch.Tensor] = []
-    margin_list:  list[torch.Tensor] = []
+    infonce_list:  list[torch.Tensor] = []
+    margin_list:   list[torch.Tensor] = []
+    soft_rp_list:  list[torch.Tensor] = []
     native_indices: list[int] = []
     offset = 0
 
@@ -600,13 +604,18 @@ def _rank_loss_step(
 
         # ── Primary contrastive loss ──────────────────────────────────────
         if use_circle_loss:
-            infonce_list.append(_circle_loss_pocket(dp, margin=margin))
+            infonce_list.append(_circle_loss_pocket(dp, margin=margin, gamma=circle_gamma))
         else:
             target = torch.zeros(1, dtype=torch.long, device=device)
             infonce_list.append(F.cross_entropy((dp / temperature).unsqueeze(0), target))
 
-        # ── Margin ranking loss ───────────────────────────────────────────
+        # ── Soft-RP: differentiable rank percentile (directly optimises eval metric) ──
         neg_scores = dp[1:]
+        if lambda_soft_rp > 0.0 and neg_scores.numel() > 0:
+            soft_rp_val = torch.sigmoid((dp[0] - neg_scores) / soft_rp_temp).mean()
+            soft_rp_list.append(soft_rp_val)
+
+        # ── Margin ranking loss ───────────────────────────────────────────
         if neg_scores.numel() > 0:
             topk_idx: "torch.Tensor | None" = None
             if hard_margin_topk > 0 and neg_scores.numel() > hard_margin_topk:
@@ -636,8 +645,12 @@ def _rank_loss_step(
     smol_cts = torch.stack(infonce_list).mean() if infonce_list else torch.tensor(0.0, device=device, requires_grad=True)
     margin_l  = torch.stack(margin_list).mean()  if margin_list  else torch.tensor(0.0, device=device, requires_grad=True)
 
-    # ── Auxiliary loss: site BCE (native ligand only) + dock ranking ─
+    # ── Auxiliary loss: soft-RP + site BCE + RNA-side InfoNCE ──────
     aux_loss = torch.tensor(0.0, device=device)
+
+    if lambda_soft_rp > 0.0 and soft_rp_list:
+        # Negate because we maximise RP (minimise negative RP)
+        aux_loss = aux_loss - lambda_soft_rp * torch.stack(soft_rp_list).mean()
 
     if lambda_site > 0.0 and "site_logits" in out and "site_label_pad" in out:
         site_logits    = out["site_logits"]     # [total_B, Lr]
@@ -993,6 +1006,8 @@ def train(cfg: dict[str, Any], fold_idx: int, resume: Path | None) -> None:
     use_circle_loss = bool(loss_cfg.get("use_circle_loss", False))
     adaptive_margin = bool(loss_cfg.get("adaptive_margin", False))
     circle_gamma    = float(loss_cfg.get("circle_gamma", 64.0))
+    lambda_soft_rp  = float(loss_cfg.get("lambda_soft_rp", 0.0))
+    soft_rp_temp    = float(loss_cfg.get("soft_rp_temp", 0.1))
     # Margin schedule: tanh decay with periodic restart (SMARTBind-style)
     # M(t) = M_0 * (1 - tanh(2 * t_in_cycle / N_restart)), t_in_cycle = epoch % N_restart
     # Set margin_restart_epochs=0 to fall back to linear decay (old behaviour).
@@ -1102,6 +1117,9 @@ def train(cfg: dict[str, Any], fold_idx: int, resume: Path | None) -> None:
                     use_fp2_ligand=use_fp2_ligand,
                     use_circle_loss=use_circle_loss,
                     adaptive_margin=adaptive_margin,
+                    circle_gamma=circle_gamma,
+                    lambda_soft_rp=lambda_soft_rp,
+                    soft_rp_temp=soft_rp_temp,
                 )
                 loss = lambda_contrast * infonce + lambda_rank * margin_l + aux_loss
                 loss.backward()
