@@ -1,0 +1,125 @@
+# hariboss5fd_rank_pkl_v27.yaml
+# BridgeBind3D v27 — v11 baseline + larger K + more epochs + soft-RP
+#
+# v11 result: mean RP ~0.748-0.756 (gap ~0.023-0.031 vs SMARTBind 0.779)
+#
+# Changes vs v11:
+#   1. K curriculum: 4/10/20 → 4/16/36
+#      Stage-3 K=20 was leaving signal on the table; K=36 brings in harder
+#      cross-pocket and decoy negatives without breaking GPU memory at bsz=8.
+#   2. cross_pocket_ratio: 0.67 → 0.75
+#      More cross-pocket negatives to match eval distribution.
+#   3. epochs: 15 → 20 (more training at the harder stage-3 negatives)
+#   4. lambda_soft_rp: 0.1 — differentiable rank percentile auxiliary loss
+#      Directly optimises the evaluation metric on top of InfoNCE.
+#   5. early_stopping.patience: 5 → 8 (give model more room to converge)
+#
+# Everything else inherited from v11 unchanged:
+#   - InfoNCE (NOT Circle Loss) with temperature=0.2
+#   - batch_size=8 (critical for 8x8 RNA InfoNCE matrix)
+#   - lambda_rank=1.0, margin decay 0.30→0.05
+#   - lambda_rna_contrast=1.0 (dual contrastive — the v11 key innovation)
+#   - EGNN-6L + GIN-4L + DistBiasedSelfAttn-4L architecture
+
+seed: 42
+
+data:
+  pkl_path: /home/liangjialu/blue_qsong1/liangjialu/data/test_RNA/new/hariboss_5fd_cov08_clustered_seqid_0.3_clean.pkl
+  decoy_lookup_path: /home/liangjialu/blue_qsong1/liangjialu/data/test_RNA/new/BridgeBind3D/data/decoy_fp2_lookup.pkl
+  rna3d_dirs:
+    - /home/liangjialu/blue_qsong1/liangjialu/data/test_RNA/rnamigos2/data/json_pockets_3d
+    - /home/liangjialu/blue_qsong1/liangjialu/data/test_RNA/new/BridgeBind3D/data/json_pockets_cif
+
+model:
+  version: 3
+  embed_dim: 256
+  num_heads: 4
+  dropout: 0.1
+  max_rna_tokens: 80
+  max_lig_tokens: 64
+
+  include_pocket_feat: true
+
+  rna_tower:
+    encoder_type: egnn
+    num_layers: 6
+
+  interaction:
+    num_layers: 4
+    use_dist_bias: true
+
+  use_pretrained_ligand: false
+
+  ligand_tower:
+    num_layers: 4
+
+  projection:
+    dim: 256
+    normalize: true
+
+train:
+  batch_size: 8
+  epochs: 20
+  steps_per_epoch: 1500
+  lr: 1.5e-4
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+
+  lr_scheduler:
+    type: cosine
+    warmup_steps: 500
+    min_lr_ratio: 0.02
+
+  # Stage-wise negative budget:
+  #   stage1  K=4   → cross=3,  hard=1
+  #   stage2  K=16  → cross=12, hard=4
+  #   stage3  K=36  → cross=27, hard=9
+  decoy_curriculum:
+    stage1_negatives_per_positive: 4
+    stage2_negatives_per_positive: 16
+    stage3_negatives_per_positive: 36
+    cross_pocket_ratio: 0.75
+
+  val_decoy_k: 100
+
+hard_negative_mining:
+  enabled: true
+  start_epoch: 5
+  refresh_every: 3
+  n_candidates: 40
+  keep_frac: 0.5
+
+loss:
+  use_circle_loss: false        # InfoNCE — proven in v11, don't touch
+  contrastive_temperature: 0.2
+  ranking_margin: 0.30
+  ranking_margin_end: 0.05
+  margin_restart_epochs: 0      # linear decay (not tanh restart)
+
+  lambda_contrast: 1.0
+  lambda_rank: 1.0
+  lambda_rna_contrast: 1.0      # dual contrastive — the v11 key
+
+  # Soft-RP: directly optimises rank percentile metric
+  lambda_soft_rp: 0.1
+  soft_rp_temp: 0.1
+
+  lambda_site: 0.3
+  site_start_epoch: 7
+
+  hard_margin_topk: 0
+  adaptive_margin: false
+
+schedule:
+  stage1_epochs: 5
+  stage2_epochs: 5
+
+output:
+  checkpoint_dir: /blue/qsong1/liangjialu/bb3d_v27/v11base_largeK_fold0
+  log_every: 50
+  val_max_pockets: 200
+
+early_stopping:
+  reload_patience: 2
+  reload_lr_scale: 0.5
+  patience: 8
