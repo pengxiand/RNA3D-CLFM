@@ -20,6 +20,12 @@ except Exception:
 NT_ORDER = ["A", "C", "G", "U", "N"]
 BOND_ORDER = ["SINGLE", "DOUBLE", "TRIPLE", "AROMATIC"]
 
+# Per-nucleotide pharmacophore properties (Watson-Crick base chemistry)
+# purine: A/G=1, C/U=0; hbd: H-bond donors/2; hba: H-bond acceptors/3
+_NT_PURINE   = {"A": 1.0, "G": 1.0, "C": 0.0, "U": 0.0, "N": 0.5}
+_NT_HBD_NORM = {"A": 0.5, "G": 1.0, "C": 0.5, "U": 1.0, "N": 0.75}
+_NT_HBA_NORM = {"A": 0.67, "G": 0.67, "C": 1.0, "U": 0.67, "N": 0.75}
+
 
 def _seed_from_text(text: str) -> int:
     digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:8]

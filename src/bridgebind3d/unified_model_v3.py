@@ -399,6 +399,144 @@ class UnifiedInteractionModelV3(nn.Module):
         self.site_head = _mlp_head(embed_dim * 3, embed_dim, dropout)
 
     # ----------------------------------------------------------------
+    def encode_rna(self, rna_bg: "BatchedGraph") -> "dict[str, torch.Tensor]":
+        """Run EGNN on B unique RNA graphs and return padded embeddings.
+
+        Call once per training batch; pass the result to forward_from_rna_cache()
+        together with all B*(1+K) ligand graphs to avoid K redundant EGNN passes.
+        """
+        device = rna_bg.node_feat.device
+        B = int(rna_bg.batch_index.max().item()) + 1
+
+        if self.include_pocket_feat and rna_bg.site_label is not None:
+            rna_node_input = torch.cat(
+                [rna_bg.node_feat, rna_bg.site_label.unsqueeze(-1)], dim=-1
+            )
+        else:
+            rna_node_input = rna_bg.node_feat
+
+        h_rna, pos_out = self.rna_encoder(
+            rna_node_input, rna_bg.pos,
+            rna_bg.edge_index, rna_bg.edge_feat,
+        )
+        h_rna = h_rna.nan_to_num(nan=0.0, posinf=0.0, neginf=0.0)
+
+        h_rna_pad, rna_mask = _unpack_to_padded(
+            h_rna, rna_bg.batch_index, B, self.max_rna_tokens
+        )
+
+        if self.use_dist_bias:
+            pos_pad, _ = _unpack_to_padded(
+                pos_out.nan_to_num(nan=0.0, posinf=0.0, neginf=0.0),
+                rna_bg.batch_index, B, self.max_rna_tokens,
+            )
+        else:
+            pos_pad = None
+
+        if rna_bg.site_label is not None:
+            sl_pad = torch.zeros(B, self.max_rna_tokens, dtype=torch.float32, device=device)
+            for _b in range(B):
+                _node_idx = (rna_bg.batch_index == _b).nonzero(as_tuple=True)[0]
+                _n = min(_node_idx.shape[0], self.max_rna_tokens)
+                sl_pad[_b, :_n] = rna_bg.site_label[_node_idx[:_n]]
+        else:
+            sl_pad = torch.zeros(B, self.max_rna_tokens, dtype=torch.float32, device=device)
+
+        return {
+            "h_rna_pad": h_rna_pad,  # [B, Lr, D]
+            "rna_mask":  rna_mask,   # [B, Lr] bool
+            "pos_pad":   pos_pad,    # [B, Lr, 3] or None
+            "sl_pad":    sl_pad,     # [B, Lr] float32
+        }
+
+    def forward_from_rna_cache(
+        self,
+        rna_cache: "dict[str, torch.Tensor]",
+        lig_bg,
+        pocket_sizes: "list[int]",
+    ) -> "dict[str, torch.Tensor]":
+        """Cross-attention + projection using pre-computed RNA embeddings.
+
+        pocket_sizes[i] = 1 + K_i for pocket i (native + K_i negatives).
+        RNA embeddings [B, Lr, D] are expanded via index-select so each pocket's
+        embedding is reused for all its 1+K_i ligands without re-running EGNN.
+        """
+        device = rna_cache["h_rna_pad"].device
+        B_total = sum(pocket_sizes)
+
+        expand_idx = torch.tensor(
+            [i for i, n in enumerate(pocket_sizes) for _ in range(n)],
+            dtype=torch.long, device=device,
+        )  # [B_total]
+
+        h_rna_pad = rna_cache["h_rna_pad"][expand_idx]   # [B_total, Lr, D]
+        rna_mask  = rna_cache["rna_mask"][expand_idx]     # [B_total, Lr]
+        sl_pad    = rna_cache["sl_pad"][expand_idx]        # [B_total, Lr]
+        pos_pad   = (
+            rna_cache["pos_pad"][expand_idx]
+            if rna_cache["pos_pad"] is not None else None
+        )
+
+        # ── Ligand encoding ──────────────────────────────────────────
+        if self.use_fp2_ligand:
+            h_lig_fp2 = self.lig_encoder(lig_bg)
+            h_lig_pad = h_lig_fp2.unsqueeze(1)
+            lig_mask  = torch.ones(B_total, 1, dtype=torch.bool, device=device)
+        elif self.use_pretrained_ligand:
+            pooled_lig_pretrained = self.lig_encoder(lig_bg)
+            h_lig_pad = pooled_lig_pretrained.unsqueeze(1)
+            lig_mask  = torch.ones(B_total, 1, dtype=torch.bool, device=device)
+        else:
+            h_lig = self.lig_encoder(
+                lig_bg.node_feat, lig_bg.edge_index, lig_bg.edge_feat,
+            )
+            h_lig_pad, lig_mask = _unpack_to_padded(
+                h_lig, lig_bg.batch_index, B_total, self.max_lig_tokens
+            )
+
+        # ── Cross-attention ──────────────────────────────────────────
+        h_rna_pad, h_lig_pad = self.interaction(
+            h_rna_pad, h_lig_pad, rna_mask, lig_mask, rna_pos=pos_pad,
+        )
+        h_rna_pad = h_rna_pad.nan_to_num(nan=0.0, posinf=0.0, neginf=0.0)
+        h_lig_pad = h_lig_pad.nan_to_num(nan=0.0, posinf=0.0, neginf=0.0)
+
+        # ── Pooling ──────────────────────────────────────────────────
+        pocket_mask = rna_mask & (sl_pad > 0.5)
+        _has_pocket = pocket_mask.any(dim=1, keepdim=True)
+        pool_mask   = torch.where(_has_pocket, pocket_mask, rna_mask)
+        pooled_rna  = self.rna_pool(h_rna_pad, pool_mask)
+        pooled_lig  = self.lig_pool(h_lig_pad, lig_mask)
+        pooled_rna  = pooled_rna.nan_to_num(nan=0.0, posinf=0.0, neginf=0.0)
+        pooled_lig  = pooled_lig.nan_to_num(nan=0.0, posinf=0.0, neginf=0.0)
+
+        # ── Projection ───────────────────────────────────────────────
+        z_rna = F.normalize(self.z_rna_proj(pooled_rna), p=2, dim=-1)
+        z_lig = F.normalize(self.z_lig_proj(pooled_lig), p=2, dim=-1)
+        rank_score = (z_rna * z_lig).sum(-1)
+
+        z_pair     = torch.cat([z_rna, z_lig, z_rna * z_lig, torch.abs(z_rna - z_lig)], dim=-1)
+        dock_score = self.dock_head(z_pair).squeeze(-1)
+
+        lig_ctx    = pooled_lig.unsqueeze(1).expand(-1, self.max_rna_tokens, -1)
+        h_rna_n    = h_rna_pad / (h_rna_pad.norm(p=2, dim=-1, keepdim=True).clamp(min=1e-6))
+        lig_ctx_n  = lig_ctx   / (lig_ctx.norm(p=2, dim=-1, keepdim=True).clamp(min=1e-6))
+        site_feat  = torch.cat([h_rna_n, lig_ctx_n, h_rna_n * lig_ctx_n], dim=-1)
+        site_logits = self.site_head(site_feat).squeeze(-1)
+
+        return {
+            "rank_score":     rank_score,
+            "screen_score":   rank_score,
+            "dock_score":     dock_score,
+            "site_logits":    site_logits,
+            "site_label_pad": sl_pad,
+            "rna_mask":       rna_mask,
+            "z_rna":          z_rna,
+            "z_lig":          z_lig,
+            "z_pair":         z_pair,
+        }
+
+    # ----------------------------------------------------------------
     def forward(
         self,
         rna_bg: BatchedGraph,
