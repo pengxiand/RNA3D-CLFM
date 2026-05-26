@@ -1,0 +1,126 @@
+# hariboss5fd_rank_pkl_v28.yaml
+# BridgeBind3D v28 — RNA encoder caching → K=72 negatives (matches SMARTBind budget)
+#
+# Key change vs v27:
+#   RNA encoder caching (encode_rna + forward_from_rna_cache in unified_model_v3.py)
+#   eliminates K+1 redundant EGNN passes per batch. EGNN now runs ONCE per unique
+#   pocket; embeddings are index-expanded before cross-attention + projection.
+#
+# This enables K=72 (matching SMARTBind's random_decoy_num=72) without OOM:
+#   Before caching: EGNN runs 8*(1+72)=584 times per step → GPU bottleneck
+#   After  caching: EGNN runs 8 times per step → 73x fewer EGNN forward passes
+#   Cross-attention still runs 8*73=584 times (ligands are unique, must process all)
+#
+# Stage-wise negative budget (K curriculum):
+#   stage1  K=4    → cross=3,  hard=1  (warm-up, easy cross-pocket negatives)
+#   stage2  K=24   → cross=18, hard=6  (medium)
+#   stage3  K=72   → cross=54, hard=18 (matches SMARTBind; 75% cross-pocket)
+#
+# Other changes vs v27:
+#   - epochs: 20 → 25 (extra time at K=72 stage)
+#   - hard_negative_mining.n_candidates: 40 → 64 (wider pool at K=72)
+#   - early_stopping.patience: 8 → 10
+#   - Everything else identical to v27 (InfoNCE, bsz=8, soft-RP=0.1)
+
+seed: 42
+
+data:
+  pkl_path: /home/liangjialu/blue_qsong1/liangjialu/data/test_RNA/new/hariboss_5fd_cov08_clustered_seqid_0.3_clean.pkl
+  decoy_lookup_path: /home/liangjialu/blue_qsong1/liangjialu/data/test_RNA/new/BridgeBind3D/data/decoy_fp2_lookup.pkl
+  rna3d_dirs:
+    - /home/liangjialu/blue_qsong1/liangjialu/data/test_RNA/rnamigos2/data/json_pockets_3d
+    - /home/liangjialu/blue_qsong1/liangjialu/data/test_RNA/new/BridgeBind3D/data/json_pockets_cif
+
+model:
+  version: 3
+  embed_dim: 256
+  num_heads: 4
+  dropout: 0.1
+  max_rna_tokens: 80
+  max_lig_tokens: 64
+
+  include_pocket_feat: true
+
+  rna_tower:
+    encoder_type: egnn
+    num_layers: 6
+
+  interaction:
+    num_layers: 4
+    use_dist_bias: true
+
+  use_pretrained_ligand: false
+
+  ligand_tower:
+    num_layers: 4
+
+  projection:
+    dim: 256
+    normalize: true
+
+train:
+  batch_size: 8
+  epochs: 25
+  steps_per_epoch: 1500
+  lr: 1.5e-4
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+
+  lr_scheduler:
+    type: cosine
+    warmup_steps: 500
+    min_lr_ratio: 0.02
+
+  # Stage-wise negative budget (K curriculum with RNA caching):
+  #   stage1  K=4   → cross=3,  hard=1
+  #   stage2  K=24  → cross=18, hard=6
+  #   stage3  K=72  → cross=54, hard=18
+  decoy_curriculum:
+    stage1_negatives_per_positive: 4
+    stage2_negatives_per_positive: 24
+    stage3_negatives_per_positive: 72
+    cross_pocket_ratio: 0.75
+
+  val_decoy_k: 100
+
+hard_negative_mining:
+  enabled: true
+  start_epoch: 5
+  refresh_every: 3
+  n_candidates: 64
+  keep_frac: 0.5
+
+loss:
+  use_circle_loss: false        # InfoNCE — proven in v11
+  contrastive_temperature: 0.2
+  ranking_margin: 0.30
+  ranking_margin_end: 0.05
+  margin_restart_epochs: 0      # linear decay
+
+  lambda_contrast: 1.0
+  lambda_rank: 1.0
+  lambda_rna_contrast: 1.0      # dual contrastive
+
+  # Soft-RP: directly optimises rank percentile metric
+  lambda_soft_rp: 0.1
+  soft_rp_temp: 0.1
+
+  lambda_site: 0.3
+  site_start_epoch: 7
+
+  hard_margin_topk: 0
+  adaptive_margin: false
+
+schedule:
+  stage1_epochs: 5
+  stage2_epochs: 5
+
+output:
+  checkpoint_dir: /blue/qsong1/liangjialu/bb3d_v28/rna_cache_K72_fold0
+  log_every: 50
+  val_max_pockets: 200
+
+early_stopping:
+  reload_patience: 2
+  reload_lr_scale: 0.5
+  patience: 10

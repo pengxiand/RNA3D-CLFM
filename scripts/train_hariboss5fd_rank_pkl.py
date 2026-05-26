@@ -557,7 +557,7 @@ def _rank_loss_step(
             continue
 
         pocket_sizes.append(1 + len(negs))
-        rna_graphs.extend([rg] * (1 + len(negs)))
+        rna_graphs.append(rg)          # one unique graph per pocket (not K+1 copies)
         all_smiles.append(rec["native_smiles"])
         all_smiles.extend(negs)
 
@@ -565,21 +565,31 @@ def _rank_loss_step(
         z = torch.tensor(0.0, device=device, requires_grad=True)
         return z, z, z
 
-    rna_bg = _to_device(batch_rna_graphs(rna_graphs), device)
+    # ── RNA encoder caching: run EGNN once per unique pocket ─────────────────
+    # rna_graphs now has len==B (not B*(K+1)); encode once and expand later.
+    unique_rna_bg = _to_device(batch_rna_graphs(rna_graphs), device)
 
     if _is_v4:
-        # v4: GIN ligand (pass SMILES list) + RNA-FM sequences
-        rna_seqs = [rg.sequence for rg in rna_graphs]
-        out = model(rna_bg, all_smiles, rna_sequences=rna_seqs)
+        # v4 uses RNA-FM for sequence encoding; fall back to repeated-graph path
+        # (v4 model handles its own caching internally via rna_sequences de-dup)
+        rna_bg_expanded = _to_device(
+            batch_rna_graphs([rna_graphs[i] for i, n in enumerate(pocket_sizes) for _ in range(n)]),
+            device,
+        )
+        rna_seqs = [rg.sequence for i, rg in enumerate(rna_graphs) for _ in range(pocket_sizes[i])]
+        out = model(rna_bg_expanded, all_smiles, rna_sequences=rna_seqs)
     elif use_fp2_ligand:
+        rna_cache = model.encode_rna(unique_rna_bg)
         lig_bg = smiles_list_to_fp2_tensor(all_smiles, device)
-        out = model(rna_bg, lig_bg)
+        out = model.forward_from_rna_cache(rna_cache, lig_bg, pocket_sizes)
     elif use_pretrained:
-        out = model(rna_bg, all_smiles)
+        rna_cache = model.encode_rna(unique_rna_bg)
+        out = model.forward_from_rna_cache(rna_cache, all_smiles, pocket_sizes)
     else:
+        rna_cache = model.encode_rna(unique_rna_bg)
         lig_graphs = [build_lig_graph_cached(s) for s in all_smiles]
         lig_bg     = _to_device(batch_ligand_graphs(lig_graphs), device)
-        out = model(rna_bg, lig_bg)
+        out = model.forward_from_rna_cache(rna_cache, lig_bg, pocket_sizes)
 
     scores      = out["rank_score"]
     dock_scores = out["dock_score"]
