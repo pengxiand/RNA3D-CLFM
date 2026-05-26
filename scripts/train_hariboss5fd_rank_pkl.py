@@ -37,7 +37,7 @@ import argparse
 import pickle
 import random
 import sys
-from collections import defaultdict
+from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any
 
@@ -494,6 +494,7 @@ def _rank_loss_step(
     circle_gamma: float = 80.0,
     lambda_soft_rp: float = 0.0,
     soft_rp_temp: float = 0.1,
+    moco_queue: "deque | None" = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """One optimisation step — SMARTBind-style mixed negatives.
 
@@ -694,16 +695,33 @@ def _rank_loss_step(
         ) / n_valid
         aux_loss = aux_loss + lambda_site * site_bce_elem
 
-    # ── RNA-side InfoNCE: sim_matrix[i,j] = z_lig_i · z_rna_j / T  (P×P) ──
-    # target = arange(P): diagonal = positive (each lig matches its own RNA)
+    # ── RNA-side InfoNCE with MoCo queue ─────────────────────────────────────
+    # sim_matrix[i,j] = z_lig_i · z_rna_j / T
+    # Columns: current batch RNAs only (z_rna_nat, shape [P, D])
+    # Rows query: current z_lig_nat [P, D] + queue z_lig entries [Q, D]
+    # → effective matrix is [P+Q, P], target = arange(P) (first P rows are positives)
     if lambda_rna_contrast > 0.0 and len(native_indices) >= 2:
         nat_t     = torch.tensor(native_indices, dtype=torch.long, device=device)
-        z_lig_nat = z_lig_all[nat_t]   # [P, D]
-        z_rna_nat = z_rna_all[nat_t]   # [P, D]
-        sim_matrix = (z_lig_nat @ z_rna_nat.T) / temperature   # [P, P]
+        z_lig_nat = z_lig_all[nat_t]   # [P, D] — current batch native ligands
+        z_rna_nat = z_rna_all[nat_t]   # [P, D] — current batch RNA pockets
+
+        # Augment ligand side with queue entries (detached from graph)
+        if moco_queue is not None and len(moco_queue) > 0:
+            z_queue = torch.stack(list(moco_queue)).to(device)   # [Q, D]
+            z_lig_ref = torch.cat([z_lig_nat, z_queue], dim=0)  # [P+Q, D]
+        else:
+            z_lig_ref = z_lig_nat                                # [P, D]
+
+        # [P, D] × [D, P+Q] → [P, P+Q]; target diagonal = arange(P)
+        sim_matrix = (z_rna_nat @ z_lig_ref.T) / temperature
         target_rna = torch.arange(len(native_indices), device=device)
         rna_cts    = F.cross_entropy(sim_matrix, target_rna)
         aux_loss   = aux_loss + lambda_rna_contrast * rna_cts
+
+        # Enqueue current batch (detach so queue holds no computation graph)
+        if moco_queue is not None:
+            for v in z_lig_nat.detach().cpu().unbind(0):
+                moco_queue.append(v)
 
     return smol_cts, margin_l, aux_loss
 
@@ -1065,6 +1083,15 @@ def train(cfg: dict[str, Any], fold_idx: int, resume: Path | None) -> None:
     n_reloads = 0                  # how many times we've reloaded best.pt
     hard_neg_cache: dict[str, list[str]] = {}   # populated at epoch end if hn_enabled
 
+    # ── MoCo queue for RNA-side InfoNCE ──────────────────────────────────────
+    # Stores detached z_lig vectors from recent steps; grows to maxlen then is FIFO.
+    # Effective RNA InfoNCE batch = current_batch_size + queue_size.
+    moco_queue_size = int(train_cfg.get("moco_queue_size", 0))
+    moco_queue: deque | None = deque(maxlen=moco_queue_size) if moco_queue_size > 0 else None
+    if moco_queue is not None:
+        print(f"[moco] queue enabled, maxlen={moco_queue_size}  "
+              f"(effective RNA InfoNCE batch ≈ {batch_size + moco_queue_size})", flush=True)
+
     for epoch in range(start_epoch, epochs):
         # ── Dynamic margin ────────────────────────────────────────────────────
         if margin_restart_epochs > 0:
@@ -1130,6 +1157,7 @@ def train(cfg: dict[str, Any], fold_idx: int, resume: Path | None) -> None:
                     circle_gamma=circle_gamma,
                     lambda_soft_rp=lambda_soft_rp,
                     soft_rp_temp=soft_rp_temp,
+                    moco_queue=moco_queue,
                 )
                 loss = lambda_contrast * infonce + lambda_rank * margin_l + aux_loss
                 loss.backward()

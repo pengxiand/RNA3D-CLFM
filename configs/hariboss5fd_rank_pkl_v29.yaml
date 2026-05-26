@@ -1,0 +1,117 @@
+# hariboss5fd_rank_pkl_v29.yaml
+# BridgeBind3D v29 — MoCo queue for RNA InfoNCE (effective batch ≈ 256)
+#
+# Key change vs v27:
+#   moco_queue_size: 248
+#   Each step: RNA InfoNCE uses 8 current z_lig + 248 queue z_lig = 256 total.
+#   Effective RNA InfoNCE batch = 256 vs SMARTBind's 24. Zero extra GPU cost.
+#
+# Why it works:
+#   RNA InfoNCE only needs z_lig vectors (D=256 floats), not graph data.
+#   Queue stores detached z_lig from recent steps (FIFO, maxlen=248).
+#   At step T: rows = z_rna_nat [P,D], cols = [z_lig_nat_T, queue_T-1..T-31] [256,D]
+#   Loss = cross_entropy([P,256] sim_matrix, arange(P))
+#   → model learns to match each RNA against 255 other ligands simultaneously.
+#
+# Everything else identical to v27:
+#   - RNA encoder caching (encode_rna + forward_from_rna_cache)
+#   - K curriculum 4/16/36, InfoNCE, bsz=8, soft-RP=0.1, dual-contrast=1.0
+
+seed: 42
+
+data:
+  pkl_path: /home/liangjialu/blue_qsong1/liangjialu/data/test_RNA/new/hariboss_5fd_cov08_clustered_seqid_0.3_clean.pkl
+  decoy_lookup_path: /home/liangjialu/blue_qsong1/liangjialu/data/test_RNA/new/BridgeBind3D/data/decoy_fp2_lookup.pkl
+  rna3d_dirs:
+    - /home/liangjialu/blue_qsong1/liangjialu/data/test_RNA/rnamigos2/data/json_pockets_3d
+    - /home/liangjialu/blue_qsong1/liangjialu/data/test_RNA/new/BridgeBind3D/data/json_pockets_cif
+
+model:
+  version: 3
+  embed_dim: 256
+  num_heads: 4
+  dropout: 0.1
+  max_rna_tokens: 80
+  max_lig_tokens: 64
+
+  include_pocket_feat: true
+
+  rna_tower:
+    encoder_type: egnn
+    num_layers: 6
+
+  interaction:
+    num_layers: 4
+    use_dist_bias: true
+
+  use_pretrained_ligand: false
+
+  ligand_tower:
+    num_layers: 4
+
+  projection:
+    dim: 256
+    normalize: true
+
+train:
+  batch_size: 8
+  moco_queue_size: 248    # effective RNA InfoNCE batch = 8 + 248 = 256
+  epochs: 20
+  steps_per_epoch: 1500
+  lr: 1.5e-4
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+
+  lr_scheduler:
+    type: cosine
+    warmup_steps: 500
+    min_lr_ratio: 0.02
+
+  decoy_curriculum:
+    stage1_negatives_per_positive: 4
+    stage2_negatives_per_positive: 16
+    stage3_negatives_per_positive: 36
+    cross_pocket_ratio: 0.75
+
+  val_decoy_k: 100
+
+hard_negative_mining:
+  enabled: true
+  start_epoch: 5
+  refresh_every: 3
+  n_candidates: 40
+  keep_frac: 0.5
+
+loss:
+  use_circle_loss: false
+  contrastive_temperature: 0.2
+  ranking_margin: 0.30
+  ranking_margin_end: 0.05
+  margin_restart_epochs: 0
+
+  lambda_contrast: 1.0
+  lambda_rank: 1.0
+  lambda_rna_contrast: 1.0
+
+  lambda_soft_rp: 0.1
+  soft_rp_temp: 0.1
+
+  lambda_site: 0.3
+  site_start_epoch: 7
+
+  hard_margin_topk: 0
+  adaptive_margin: false
+
+schedule:
+  stage1_epochs: 5
+  stage2_epochs: 5
+
+output:
+  checkpoint_dir: /blue/qsong1/liangjialu/bb3d_v29/moco256_fold0
+  log_every: 50
+  val_max_pockets: 200
+
+early_stopping:
+  reload_patience: 2
+  reload_lr_scale: 0.5
+  patience: 8
